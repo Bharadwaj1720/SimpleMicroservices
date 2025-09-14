@@ -14,6 +14,10 @@ from typing import Optional
 from models.person import PersonCreate, PersonRead, PersonUpdate
 from models.address import AddressCreate, AddressRead, AddressUpdate
 from models.health import Health
+#Adding imports
+from models.product import ProductCreate, ProductRead, ProductUpdate
+from models.order import OrderCreate, OrderRead, OrderUpdate, LineItem
+
 
 port = int(os.environ.get("FASTAPIPORT", 8000))
 
@@ -22,6 +26,10 @@ port = int(os.environ.get("FASTAPIPORT", 8000))
 # -----------------------------------------------------------------------------
 persons: Dict[UUID, PersonRead] = {}
 addresses: Dict[UUID, AddressRead] = {}
+#Adding in-memory stores
+products: Dict[UUID, ProductRead] = {}
+orders: Dict[UUID, OrderRead] = {}
+
 
 app = FastAPI(
     title="Person/Address API",
@@ -32,6 +40,16 @@ app = FastAPI(
 # -----------------------------------------------------------------------------
 # Address endpoints
 # -----------------------------------------------------------------------------
+
+# Adding helper to compute order totals.
+def compute_order_total(line_items: List[LineItem]) -> float:
+    total = 0.0
+    for li in line_items:
+        prod = products.get(li.product_id)
+        if not prod:
+            raise HTTPException(status_code=400, detail=f"Unknown product_id: {li.product_id}")
+        total += float(prod.price) * int(li.quantity)
+    return round(total, 2)
 
 def make_health(echo: Optional[str], path_echo: Optional[str]=None) -> Health:
     return Health(
@@ -158,6 +176,118 @@ def update_person(person_id: UUID, update: PersonUpdate):
     stored.update(update.model_dump(exclude_unset=True))
     persons[person_id] = PersonRead(**stored)
     return persons[person_id]
+
+
+
+# -----------------------------------------------------------------------------
+# Product endpoints
+# -----------------------------------------------------------------------------
+@app.post("/products", response_model=ProductRead, status_code=201)
+def create_product(product: ProductCreate):
+    if product.id in products:
+        raise HTTPException(status_code=400, detail="Product with this ID already exists")
+    prod = ProductRead(**product.model_dump())
+    products[prod.id] = prod
+    return prod
+
+@app.get("/products", response_model=List[ProductRead])
+def list_products(
+    name: Optional[str] = Query(None, description="Filter by case-insensitive name substring"),
+):
+    results = list(products.values())
+    if name:
+        name_l = name.lower()
+        results = [p for p in results if name_l in p.name.lower()]
+    return results
+
+@app.get("/products/{product_id}", response_model=ProductRead)
+def get_product(product_id: UUID = Path(..., description="Product ID")):
+    if product_id not in products:
+        raise HTTPException(status_code=404, detail="Product not found")
+    return products[product_id]
+
+@app.patch("/products/{product_id}", response_model=ProductRead)
+def update_product(product_id: UUID, patch: ProductUpdate):
+    if product_id not in products:
+        raise HTTPException(status_code=404, detail="Product not found")
+    data = products[product_id].model_dump()
+    updates = patch.model_dump(exclude_unset=True)
+    data.update(updates)
+    # Update timestamp on modification
+    data["updated_at"] = datetime.utcnow()
+    updated = ProductRead(**data)
+    products[product_id] = updated
+    return updated
+
+@app.delete("/products/{product_id}", status_code=204)
+def delete_product(product_id: UUID):
+    if product_id not in products:
+        raise HTTPException(status_code=404, detail="Product not found")
+    del products[product_id]
+    return None
+
+
+# -----------------------------------------------------------------------------
+# Order endpoints
+# -----------------------------------------------------------------------------
+@app.post("/orders", response_model=OrderRead, status_code=201)
+def create_order(order: OrderCreate):
+    # Compute total (validates product IDs)
+    total = compute_order_total(order.items)
+    data = order.model_dump()
+    data["total_amount"] = total
+    orr = OrderRead(**data)
+    if orr.id in orders:
+        raise HTTPException(status_code=400, detail="Order with this ID already exists")
+    orders[orr.id] = orr
+    return orr
+
+@app.get("/orders", response_model=List[OrderRead])
+def list_orders(
+    customer_name: Optional[str] = Query(None, description="Filter by case-insensitive customer name substring"),
+):
+    results = list(orders.values())
+    if customer_name:
+        key = customer_name.lower()
+        results = [o for o in results if key in o.customer_name.lower()]
+    return results
+
+@app.get("/orders/{order_id}", response_model=OrderRead)
+def get_order(order_id: UUID = Path(..., description="Order ID")):
+    if order_id not in orders:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return orders[order_id]
+
+@app.patch("/orders/{order_id}", response_model=OrderRead)
+def update_order(order_id: UUID, patch: OrderUpdate):
+    if order_id not in orders:
+        raise HTTPException(status_code=404, detail="Order not found")
+    data = orders[order_id].model_dump()
+    updates = patch.model_dump(exclude_unset=True)
+
+    if "customer_name" in updates and updates["customer_name"] is not None:
+        data["customer_name"] = updates["customer_name"]
+
+    if "items" in updates and updates["items"] is not None:
+        data["items"] = updates["items"]
+        data["total_amount"] = compute_order_total(updates["items"])
+
+    if "note" in updates:
+        data["note"] = updates["note"]
+
+    # Update timestamp on modification
+    data["updated_at"] = datetime.utcnow()
+
+    updated = OrderRead(**data)
+    orders[order_id] = updated
+    return updated
+
+@app.delete("/orders/{order_id}", status_code=204)
+def delete_order(order_id: UUID):
+    if order_id not in orders:
+        raise HTTPException(status_code=404, detail="Order not found")
+    del orders[order_id]
+    return None
 
 # -----------------------------------------------------------------------------
 # Root
